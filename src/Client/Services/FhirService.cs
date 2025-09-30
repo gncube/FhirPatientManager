@@ -1,22 +1,26 @@
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Rest;
-using FhirPatientManager.Models;
+using FhirPatientManager.Client.Models;
 
-namespace FhirPatientManager.Services;
+namespace FhirPatientManager.Client.Services;
 
+/// <summary>
+/// Implementation of FHIR patient operations using the HAPI FHIR public server.
+/// Connects to https://hapi.fhir.org/baseR4 for real FHIR R4 operations.
+/// </summary>
 public class FhirService : IFhirService
 {
-    private readonly FhirClient _client;
+    private readonly FhirClient _fhirClient;
     private const string FhirServerUrl = "https://hapi.fhir.org/baseR4";
 
     public FhirService()
     {
-        _client = new FhirClient(FhirServerUrl)
+        _fhirClient = new FhirClient(FhirServerUrl)
         {
             Settings = new FhirClientSettings
             {
                 PreferredFormat = ResourceFormat.Json,
-                Timeout = 30000
+                Timeout = 60 * 1000 // 60 seconds
             }
         };
     }
@@ -25,10 +29,16 @@ public class FhirService : IFhirService
     {
         try
         {
-            var bundle = await _client.SearchAsync<Patient>(new[] { "_count=50" });
-            return bundle.Entry.Select(e => MapToViewModel((Patient)e.Resource)).ToList();
+            var searchParams = new SearchParams().LimitTo(20);
+            var bundle = await _fhirClient.SearchAsync<Patient>(searchParams);
+            var patients = bundle?.Entry?
+                .Select(entry => entry.Resource as Patient)
+                .Where(p => p != null)
+                .Select(p => MapToViewModel(p!))
+                .ToList() ?? new List<PatientViewModel>();
+            return patients;
         }
-        catch
+        catch (Exception)
         {
             return new List<PatientViewModel>();
         }
@@ -38,57 +48,12 @@ public class FhirService : IFhirService
     {
         try
         {
-            var patient = await _client.ReadAsync<Patient>($"Patient/{id}");
-            return MapToViewModel(patient);
+            var patient = await _fhirClient.ReadAsync<Patient>($"Patient/{id}");
+            return patient != null ? MapToViewModel(patient) : null;
         }
-        catch
+        catch (Exception)
         {
             return null;
-        }
-    }
-
-    public async Task<PatientViewModel> CreatePatientAsync(PatientViewModel patientVm)
-    {
-        var patient = MapToFhirPatient(patientVm);
-        var created = await _client.CreateAsync(patient);
-        return MapToViewModel(created);
-    }
-
-    public async Task<PatientViewModel> UpdatePatientAsync(PatientViewModel patientVm)
-    {
-        var patient = MapToFhirPatient(patientVm);
-        patient.Id = patientVm.Id;
-        var updated = await _client.UpdateAsync(patient);
-        return MapToViewModel(updated);
-    }
-
-    public async Task<bool> DeletePatientAsync(string id)
-    {
-        try
-        {
-            await _client.DeleteAsync($"Patient/{id}");
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    public async Task<List<PatientViewModel>> SearchPatientsByNameAsync(string searchTerm)
-    {
-        try
-        {
-            var bundle = await _client.SearchAsync<Patient>(new[]
-            {
-                $"name:contains={searchTerm}",
-                "_count=50"
-            });
-            return bundle.Entry.Select(e => MapToViewModel((Patient)e.Resource)).ToList();
-        }
-        catch
-        {
-            return new List<PatientViewModel>();
         }
     }
 
@@ -96,80 +61,115 @@ public class FhirService : IFhirService
     {
         try
         {
-            // Search by name
-            var nameBundle = await _client.SearchAsync<Patient>(new[]
-            {
-                $"name:contains={searchTerm}",
-                "_count=50"
-            });
-
-            // Search by phone
-            var phoneBundle = await _client.SearchAsync<Patient>(new[]
-            {
-                $"telecom={searchTerm}",
-                "_count=50"
-            });
-
-            var patients = new Dictionary<string, PatientViewModel>();
-
-            foreach (var entry in nameBundle.Entry.Concat(phoneBundle.Entry))
-            {
-                var patient = (Patient)entry.Resource;
-                if (!patients.ContainsKey(patient.Id))
-                {
-                    patients[patient.Id] = MapToViewModel(patient);
-                }
-            }
-
-            return patients.Values.ToList();
+            var searchParams = new SearchParams()
+                .Where($"name:contains={searchTerm}")
+                .LimitTo(50);
+            var bundle = await _fhirClient.SearchAsync<Patient>(searchParams);
+            var patients = bundle?.Entry?
+                .Select(entry => entry.Resource as Patient)
+                .Where(p => p != null)
+                .Select(p => MapToViewModel(p!))
+                .ToList() ?? new List<PatientViewModel>();
+            return patients;
         }
-        catch
+        catch (Exception)
         {
             return new List<PatientViewModel>();
         }
     }
 
+    public async Task<PatientViewModel> CreatePatientAsync(PatientViewModel patientViewModel)
+    {
+        try
+        {
+            var patient = MapToFhirPatient(patientViewModel);
+            var createdPatient = await _fhirClient.CreateAsync(patient);
+            return createdPatient != null ? MapToViewModel(createdPatient) : patientViewModel;
+        }
+        catch (Exception)
+        {
+            return patientViewModel;
+        }
+    }
+
+    public async Task<PatientViewModel> UpdatePatientAsync(PatientViewModel patientViewModel)
+    {
+        try
+        {
+            var patient = MapToFhirPatient(patientViewModel);
+            patient.Id = patientViewModel.Id;
+            var updatedPatient = await _fhirClient.UpdateAsync(patient);
+            return updatedPatient != null ? MapToViewModel(updatedPatient) : patientViewModel;
+        }
+        catch (Exception)
+        {
+            return patientViewModel;
+        }
+    }
+
+    public async Task<bool> DeletePatientAsync(string id)
+    {
+        try
+        {
+            await _fhirClient.DeleteAsync($"Patient/{id}");
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
     private PatientViewModel MapToViewModel(Patient patient)
     {
-        var name = patient.Name.FirstOrDefault();
-        var phone = patient.Telecom?.FirstOrDefault(t => t.System == ContactPoint.ContactPointSystem.Phone);
+        var givenName = patient.Name?.FirstOrDefault()?.Given?.FirstOrDefault() ?? string.Empty;
+        var familyName = patient.Name?.FirstOrDefault()?.Family ?? string.Empty;
+        var phoneNumber = patient.Telecom?.FirstOrDefault(t => t.System == ContactPoint.ContactPointSystem.Phone)?.Value;
+        var gender = patient.Gender?.ToString() ?? "Unknown";
+        var birthDate = !string.IsNullOrEmpty(patient.BirthDate) ? DateTime.Parse(patient.BirthDate) : (DateTime?)null;
 
         return new PatientViewModel
         {
             Id = patient.Id,
-            FamilyName = name?.Family ?? string.Empty,
-            GivenName = name?.Given.FirstOrDefault() ?? string.Empty,
-            Gender = patient.Gender?.ToString() ?? string.Empty,
-            BirthDate = DateTime.TryParse(patient.BirthDate, out var date) ? date : null,
-            PhoneNumber = phone?.Value ?? string.Empty
+            GivenName = givenName,
+            FamilyName = familyName,
+            Gender = gender,
+            BirthDate = birthDate,
+            PhoneNumber = phoneNumber
         };
     }
 
-    private Patient MapToFhirPatient(PatientViewModel vm)
+    private Patient MapToFhirPatient(PatientViewModel viewModel)
     {
-        return new Patient
+        var patient = new Patient
         {
             Name = new List<HumanName>
             {
                 new HumanName
                 {
-                    Family = vm.FamilyName,
-                    Given = new[] { vm.GivenName }
+                    Given = new[] { viewModel.GivenName },
+                    Family = viewModel.FamilyName
                 }
             },
-            Gender = Enum.TryParse<AdministrativeGender>(vm.Gender, true, out var gender)
+            Gender = Enum.TryParse<AdministrativeGender>(viewModel.Gender, true, out var gender)
                 ? gender
                 : AdministrativeGender.Unknown,
-            BirthDate = vm.BirthDate?.ToString("yyyy-MM-dd"),
-            Telecom = new List<ContactPoint>
+            BirthDate = viewModel.BirthDate?.ToString("yyyy-MM-dd")
+        };
+
+        if (!string.IsNullOrWhiteSpace(viewModel.PhoneNumber))
+        {
+            patient.Telecom = new List<ContactPoint>
             {
                 new ContactPoint
                 {
                     System = ContactPoint.ContactPointSystem.Phone,
-                    Value = vm.PhoneNumber,
+                    Value = viewModel.PhoneNumber,
                     Use = ContactPoint.ContactPointUse.Mobile
                 }
-            }
-        };
+            };
+        }
+
+        return patient;
     }
 }
