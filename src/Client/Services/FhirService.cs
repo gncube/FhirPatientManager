@@ -13,16 +13,16 @@ public class FhirService : IFhirService
     private readonly FhirClient _fhirClient;
     private const string FhirServerUrl = "https://hapi.fhir.org/baseR4";
 
-    public FhirService()
+    public FhirService(HttpClient httpClient)
     {
-        _fhirClient = new FhirClient(FhirServerUrl)
+        // Configure HttpClient for FHIR server
+        httpClient.BaseAddress = new Uri(FhirServerUrl);
+
+        _fhirClient = new FhirClient(FhirServerUrl, httpClient, new FhirClientSettings
         {
-            Settings = new FhirClientSettings
-            {
-                PreferredFormat = ResourceFormat.Json,
-                Timeout = 60 * 1000 // 60 seconds
-            }
-        };
+            PreferredFormat = ResourceFormat.Json,
+            Timeout = 60000 // 60 seconds
+        });
     }
 
     public async Task<List<PatientViewModel>> GetAllPatientsAsync()
